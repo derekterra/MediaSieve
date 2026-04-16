@@ -1,122 +1,254 @@
 import os
 from exif import Image as EXIF
 from PIL import Image as ImagePilow
+from keras.models import load_model
 import shutil
 import re
+import subprocess
+import json
+import numpy as np
+import tensorflow as tf
+import hashlib
+import uuid
+import pdb
+# from PIL import Image
+
+
 
 IMAGE_EXTENSIONS = [
-    "jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif",
-    "svg", "ico", "heic", "heif", "xcf",
-    "raw", "cr2", "nef", "arw", "dng", "orf", "rw2"
+	"jpg", "jpeg", "png", "gif", "svg", "webp"
 ]
 
 VIDEO_EXTENSIONS = [
-    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm",
-    "mpeg", "mpg", "m4v", "3gp", "mts", "m2ts", "vob", "ogv"
+	"mp4", "mkv", "avi", "webm"
 ]
 
-# with open('./photos/Fotos DropBox/20.jpg', 'rb') as image_file:
-    #  my_image = Image(image_file)
+model = load_model('memeclassifier.keras')
 
-# print(my_image.has_exif)
-# print(my_image.list_all())
-# print(my_image.datetime_original)
+def load_image_for_model(path):
+    # try:
+    #     # 🔍 Validar con PIL primero
+    #     with ImagePilow.open(path) as img:
+    #         img.verify()
+
+    #     img = tf.io.read_file(path)
+    #     img = tf.image.decode_image(img, channels=3)
+    #     img = tf.image.resize(img, (256, 256))
+    #     img = img / 255.0
+
+    #     return img
+
+    # except Exception as e:
+    #     print(f"Imagen inválida: {path} → {e}")
+    #     return None
+    try:
+
+        img = ImagePilow.open(path).convert("RGB")
+        img = np.array(img)
+        img = tf.image.resize(img, (256, 256))
+        img = np.squeeze(img)
+        img = img / 255.0
+
+        return img
+
+    except Exception as e:
+        print(f"Error con {path}: {e}")
+        return None
+	
+
+def process_image(path):
+	if not is_valid_image_pillow(path):
+		return
+
+	exif = get_exif(path)
+	classification = classify_image(path, exif)
+	date = get_best_date(path, exif)
+
+	print('classification')
+	print(classification)
+
+	if classification == "probablyReal" or date != '0000':
+		move_to_folder(path, f'./organized_photos/{date}')
+	else:
+		resized_photo = load_image_for_model(path)
+
+		if resized_photo is None:
+			move_to_folder(path, './organized_photos/corrupted_photos')
+
+		if len(resized_photo.shape) != 3:
+			move_to_folder(path, './organized_photos/corrupted_photos')
+
+		prediction = model.predict(np.expand_dims(resized_photo, 0))
+
+		if prediction < 0.3:
+			print(f'el archivo {path} es un meme')
+			move_to_folder(path, './organized_photos/memes')
+		else:
+			#Here we are sure that is not a meme, so we try to classified
+			date = get_best_date(path, exif)
+			if date == '0000':
+				move_to_folder(path, './organized_photos/others')
+			else:
+				move_to_folder(path, f'./organized_photos/{date}')
+
+
+def process_video(path):
+	metadata = get_video_metadata(path)
+
+	if is_video_from_device(metadata):
+		date = get_video_date(metadata)
+		move_to_folder(path, f'./organized_videos/{date}')
+	else:
+		move_to_folder(path, './organized_videos/others')
+
+def get_video_metadata(path):
+	cmd = [
+		"ffprobe",
+		"-v", "quiet",
+		"-print_format", "json",
+		"-show_format",
+		"-show_streams",
+		path
+	]
+
+	result = subprocess.run(cmd, capture_output=True, text=True)
+	return json.loads(result.stdout)
+
+def get_video_date(metadata):
+	try:
+		return metadata["format"]["tags"]["creation_time"][:4]
+	except:
+		return "unknown"
+	
+def is_video_from_device(metadata):
+	tags = metadata.get("format", {}).get("tags", {})
+
+	if "creation_time" in tags:
+		return True
+
+	if "encoder" in tags and "Lavf" not in tags["encoder"]:
+		return True
+
+	return False
+
+def get_exif(path):
+	try:
+		return ImagePilow.open(path)._getexif()
+	except:
+		return None
+	
+def classify_image(path, exif):
+	if not exif:
+		return "probablyMeme"
+
+	score = 0
+
+	# Cámara
+	if any(tag in exif for tag in [271, 272]):  # Make, Model
+		score += 1
+
+	if 36867 in exif:  # DateTimeOriginal
+		score += 1
+
+	# Parámetros técnicos
+	if any(tag in exif for tag in [33434, 33437, 34855]):
+		score += 1
+
+	# Nombre del archivo (heurística)
+	filename = os.path.basename(path).lower()
+	if "img_" in filename or "dsc_" in filename:
+		score += 1
+
+	if score >= 3:
+		return "probablyReal"
+	else:
+		return "probablyMeme"
+
+def get_best_date(path, exif):
+	# 1. EXIF
+	if exif and 36867 in exif:
+		return str(exif[36867])[:4]
+
+	# 2. Nombre
+	filename = os.path.basename(path)
+	regex_date = regex_get_date_on_name(filename)
+	if regex_date:
+		return regex_date
+
+	# 3. Default
+	return "0000"
+
+def move_to_folder(path, destination):
+	if destination == './organized_photos/memes':
+		print(f'la foto {path} es un sucio meme')
+	if not os.path.exists(destination):
+		os.makedirs(destination)
+
+	filename = os.path.basename(path)
+	shutil.move(path, os.path.join(destination, filename))
 
 def regex_get_date_on_name(file_name):
-    print(f'entre para {file_name}')
-    regex = r'\b(?:19\d{2}|2\d{3})\b'
-    date = re.search(regex, file_name)
-    print('date')
-    print(date)
+	regex = r'(19\d{2}|20\d{2})'
+	match = re.search(regex, file_name)
 
-    if date:
-        print('date.group()')  # 2014
-        print(date.group())  # 2014
-        return date.group()
-    else:
-        return None
-
+	if match:
+		return match.group(1)
+	return None
 
 def is_valid_image_pillow(file_name):
-    try:
-        with ImagePilow.open(file_name) as img:
-            img.verify()
-            return True
-    except (IOError, SyntaxError):
-        return False
-    
-def get_format(file_name):
-    img = ImagePilow.open(file_name)
-    # print("Format")
-    # print(img.format)
-    return str(img.format)
-    
-def get_date_taken(path):
-    exif = ImagePilow.open(path)._getexif()
-    if exif is None:
-        return '0000'
-        
-    if 36867 in exif:
-        date = exif[36867]
-    else:
-        date = '0000'
+	try:
+		with ImagePilow.open(file_name) as img:
+			img.verify()
+			return True
+	except (IOError, SyntaxError):
+		return False
+	
 
-    return str(date)[0:4]
+def get_file_hash(path):
+	hasher = hashlib.md5()
+	with open(path, 'rb') as f:
+		while chunk := f.read(8192):
+			hasher.update(chunk)
+	return hasher.hexdigest()
 
 root_directory = "./photos"
-print(f"Walking through directory: {root_directory}")
+os.makedirs('./duplicates', exist_ok=True)
+hashes = {}
+
 for dirpath, dirnames, filenames in os.walk(root_directory):
-    print(f"\nCurrently in directory: {dirpath}")
-    # if dirnames:
-        # print(f"Subdirectories found: {dirnames}")
-    if filenames:
-        # print(f"Files found: {filenames}")
-        for file in filenames:
-            # print(f"file_name: {file}")
-            # Construct the full file path using os.path.join
-            full_file_path = os.path.join(dirpath, file)
-            with open(full_file_path, 'rb') as image_file:
-                file_extension = file.split(".",1)[1]
-                if file_extension in IMAGE_EXTENSIONS:
+	for file in filenames:
+		# pdb.set_trace()
+		full_file_path = os.path.join(dirpath, file)
 
-                    if is_valid_image_pillow(full_file_path):
-                        print("full_file_path")
-                        print(full_file_path)
-                        print(get_date_taken(full_file_path))
-                        date = get_date_taken(full_file_path)
-                        if date == '0000':
-                            regex_date = regex_get_date_on_name(file)
-                            if regex_date is not None:
-                                date = regex_date
+		try:
+			file_extension = file.split(".", 1)[-1].lower()
 
-                        newpath = r'./orginzed_photos/'+date 
-                        if not os.path.exists(newpath):
-                            os.makedirs(newpath)
-
-                        shutil.move(full_file_path,(newpath+'/'+file))
+			file_hash = get_file_hash(full_file_path)
+			if file_extension in IMAGE_EXTENSIONS:
 
 
-                        # format_image_file = get_format(image_file)
+				if file_hash in hashes:
+					# duplicado exacto
+					filename = os.path.basename(full_file_path)
+					new_name = f"{uuid.uuid4()}_{filename}"
+					destination = os.path.join('./duplicates', new_name)
+					shutil.move(full_file_path, destination)
+					print(f"Duplicado movido: {full_file_path}")
+					continue
 
-                        # if format_image_file == 'JPEG' or format_image_file == 'JPG':
-                        #     my_image = EXIF(image_file)
-                        #     print('my_image')
-                        #     print(my_image.list_all())
-                        #     # print(my_image.has_exif)
-                        
-                        #     if my_image.has_exif:
-                        #         print('my_image')
-                        #         print(my_image)
-                        
-                        # elif format_image_file == "PNG":
-                        #     print("entre al PNG")
-                        #     img = ImagePilow.open(image_file)
-                        #     print('img.info')
-                        #     print(img.info)
-                        #     print(type(img.info))
-                        #     print(img.info['CreateDate'])
+			else:
+				hashes[file_hash] = full_file_path
 
-                elif file_extension in VIDEO_EXTENSIONS:
-                    print('still working on this')
+			if file_extension in IMAGE_EXTENSIONS:
+				process_image(full_file_path)
 
+			elif file_extension in VIDEO_EXTENSIONS:
+				pass
+				# process_video(full_file_path)
+
+			else:
+				move_to_folder(full_file_path, f'./organized_photos/unknown')
+
+		except Exception as e:
+			print(f"Error con {full_file_path}: {e}")
 
