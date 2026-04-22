@@ -10,7 +10,10 @@ import numpy as np
 import tensorflow as tf
 import hashlib
 import uuid
+import platform
 import pdb
+import ffmpeg
+from datetime import datetime
 # from PIL import Image
 
 
@@ -26,36 +29,37 @@ VIDEO_EXTENSIONS = [
 model = load_model('memeclassifier.keras')
 
 def load_image_for_model(path):
-    # try:
-    #     # 🔍 Validar con PIL primero
-    #     with ImagePilow.open(path) as img:
-    #         img.verify()
+	# try:
+	#     # 🔍 Validar con PIL primero
+	#     with ImagePilow.open(path) as img:
+	#         img.verify()
 
-    #     img = tf.io.read_file(path)
-    #     img = tf.image.decode_image(img, channels=3)
-    #     img = tf.image.resize(img, (256, 256))
-    #     img = img / 255.0
+	#     img = tf.io.read_file(path)
+	#     img = tf.image.decode_image(img, channels=3)
+	#     img = tf.image.resize(img, (256, 256))
+	#     img = img / 255.0
 
-    #     return img
+	#     return img
 
-    # except Exception as e:
-    #     print(f"Imagen inválida: {path} → {e}")
-    #     return None
-    try:
+	# except Exception as e:
+	#     print(f"Imagen inválida: {path} → {e}")
+	#     return None
+	try:
 
-        img = ImagePilow.open(path).convert("RGB")
-        img = np.array(img)
-        img = tf.image.resize(img, (256, 256))
-        img = np.squeeze(img)
-        img = img / 255.0
+		img = ImagePilow.open(path).convert("RGB")
+		img = np.array(img)
+		img = tf.image.resize(img, (256, 256))
+		img = np.squeeze(img)
+		img = img / 255.0
 
-        return img
+		return img
 
-    except Exception as e:
-        print(f"Error con {path}: {e}")
-        return None
+	except Exception as e:
+		print(f"Error con {path}: {e}")
+		return None
 	
 
+# Divifir este metodo para que use la prediccion aparte
 def process_image(path):
 	if not is_valid_image_pillow(path):
 		return
@@ -67,7 +71,7 @@ def process_image(path):
 	print('classification')
 	print(classification)
 
-	if classification == "probablyReal" or date != '0000':
+	if classification == "probablyReal" and date != '0000':
 		move_to_folder(path, f'./organized_photos/{date}')
 	else:
 		resized_photo = load_image_for_model(path)
@@ -93,26 +97,81 @@ def process_image(path):
 
 
 def process_video(path):
-	metadata = get_video_metadata(path)
+	date = get_best_date_video(path)
+	is_probably_from_camera = is_probably_camera_video(path)
 
-	if is_video_from_device(metadata):
-		date = get_video_date(metadata)
+	print(f"is_probably_from_camera{path}")
+	print(is_probably_from_camera)
+
+	if date != '0000' and is_probably_from_camera:
 		move_to_folder(path, f'./organized_videos/{date}')
-	else:
-		move_to_folder(path, './organized_videos/others')
+		pass
+	# print("date")
+	# print(date)
+	
+	# if is_video_from_device(metadata):
+	# 	date = get_video_date(metadata)
+	# 	move_to_folder(path, f'./organized_videos/{date}')
+	# else:
+	# 	move_to_folder(path, './organized_videos/others')
 
-def get_video_metadata(path):
-	cmd = [
-		"ffprobe",
-		"-v", "quiet",
-		"-print_format", "json",
-		"-show_format",
-		"-show_streams",
-		path
-	]
+# def get_video_metadata_linux(path):
+# 	cmd = ["ffprobe","-v", "quiet","-print_format", "json","-show_format","-show_streams",path]
+# 	result = subprocess.run(cmd, capture_output=True, text=True)
+# 	return json.loads(result.stdout)
 
-	result = subprocess.run(cmd, capture_output=True, text=True)
-	return json.loads(result.stdout)
+# def get_video_metadata_windows(path):
+# 	properties = propsys.SHGetPropertyStoreFromParsingName(path)
+# 	dt = properties.GetValue(pscon.PKEY_Media_DateEncoded).GetValue()
+# 	return dt
+
+def get_best_date_video(path):
+	probe = ffmpeg.probe(path)
+
+	# 🔹 1. Buscar en format
+	format_tags = probe.get('format', {}).get('tags', {})
+	creation_time = format_tags.get('creation_time')
+
+	if creation_time:
+		dt = datetime.strptime(creation_time, "%Y-%m-%dT%H:%M:%S.%fZ")
+		year = str(dt.year)
+		return year
+
+	streams = probe.get('streams', [])
+	for stream in streams:
+		tags = stream.get('tags', {})
+		if 'creation_time' in tags:
+			creation_time = tags['creation_time']
+			dt = datetime.strptime(creation_time, "%Y-%m-%dT%H:%M:%S.%fZ")
+			year = str(dt.year)
+			return year
+
+	# 2. Nombre
+	filename = os.path.basename(path)
+	regex_date = regex_get_date_on_name(filename)
+	if regex_date:
+		return regex_date
+
+	return "0000"
+
+def is_probably_camera_video(path):
+	probe = ffmpeg.probe(path)
+
+	tags = probe.get('format', {}).get('tags', {})
+
+	# 🔹 Señales de cámara
+	if any(k.startswith('com.android') for k in tags):
+		return True
+
+	if any(k.startswith('com.apple') for k in tags):
+		return True
+
+	# 🔹 Nombre tipo cámara (YYYYMMDD_HHMMSS)
+	import re
+	if re.search(r'\d{8}_\d{6}', path):
+		return True
+
+	return False
 
 def get_video_date(metadata):
 	try:
@@ -179,8 +238,6 @@ def get_best_date(path, exif):
 	return "0000"
 
 def move_to_folder(path, destination):
-	if destination == './organized_photos/memes':
-		print(f'la foto {path} es un sucio meme')
 	if not os.path.exists(destination):
 		os.makedirs(destination)
 
@@ -243,8 +300,8 @@ for dirpath, dirnames, filenames in os.walk(root_directory):
 				process_image(full_file_path)
 
 			elif file_extension in VIDEO_EXTENSIONS:
-				pass
-				# process_video(full_file_path)
+				# pass
+				process_video(full_file_path)
 
 			else:
 				move_to_folder(full_file_path, f'./organized_photos/unknown')
